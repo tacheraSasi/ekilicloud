@@ -19,16 +19,35 @@ type DeployRequest struct {
 
 // Helper function for running shell commands with a timeout
 func runCommand(cmd *exec.Cmd, timeout time.Duration) ([]byte, error) {
-	// Create a context with a timeout
+	// Create a new context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	// Set the context to the command
-	cmd = cmd.WithContext(ctx)
+	// Start the command as a goroutine
+	done := make(chan error)
+	var output []byte
 
-	// Run the command and capture the output
-	output, err := cmd.CombinedOutput()
-	return output, err
+	// Run the command in a separate goroutine
+	go func() {
+		var err error
+		output, err = cmd.CombinedOutput()
+		done <- err
+	}()
+
+	// Wait for either the command to finish or the timeout to occur
+	select {
+	case err := <-done:
+		// If the command finished, return the output and any errors
+		if err != nil {
+			return output, err
+		}
+	case <-ctx.Done():
+		// If the context (timeout) is reached, kill the command
+		cmd.Process.Kill()
+		return nil, fmt.Errorf("command timed out")
+	}
+
+	return output, nil
 }
 
 func deployHandler(w http.ResponseWriter, r *http.Request) {
