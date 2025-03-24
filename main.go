@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -17,9 +18,15 @@ type DeployRequest struct {
 }
 
 // Helper function for running shell commands with a timeout
-func runCommand(cmd *exec.Cmd) ([]byte, error) {
-	// Timeout for each command to prevent hanging
-	cmd.Timeout = time.Second * 300 // Set a timeout for each command, e.g., 5 minutes
+func runCommand(cmd *exec.Cmd, timeout time.Duration) ([]byte, error) {
+	// Create a context with a timeout
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// Set the context to the command
+	cmd = cmd.WithContext(ctx)
+
+	// Run the command and capture the output
 	output, err := cmd.CombinedOutput()
 	return output, err
 }
@@ -43,7 +50,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 
 	// Clone the repository into the build folder
 	cloneCmd := exec.Command("git", "clone", req.RepoURL, buildFolder)
-	cloneOutput, err := runCommand(cloneCmd)
+	cloneOutput, err := runCommand(cloneCmd, 5*time.Minute) // 5-minute timeout
 	if err != nil {
 		log.Printf("Git clone error: %s", string(cloneOutput))
 		http.Error(w, "Failed to clone repository", http.StatusInternalServerError)
@@ -53,7 +60,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	// Run "npm install" in the cloned directory
 	npmInstallCmd := exec.Command("npm", "install")
 	npmInstallCmd.Dir = buildFolder
-	installOutput, err := runCommand(npmInstallCmd)
+	installOutput, err := runCommand(npmInstallCmd, 10*time.Minute) // 10-minute timeout
 	if err != nil {
 		log.Printf("npm install error: %s", string(installOutput))
 		http.Error(w, "npm install failed", http.StatusInternalServerError)
@@ -63,7 +70,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	// Run "npm run build" in the cloned directory
 	npmBuildCmd := exec.Command("npm", "run", "build")
 	npmBuildCmd.Dir = buildFolder
-	buildOutput, err := runCommand(npmBuildCmd)
+	buildOutput, err := runCommand(npmBuildCmd, 10*time.Minute) // 10-minute timeout
 	if err != nil {
 		log.Printf("npm build error: %s", string(buildOutput))
 		http.Error(w, "npm build failed", http.StatusInternalServerError)
