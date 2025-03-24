@@ -30,7 +30,6 @@ type Deployment struct {
 		Clone   string `json:"clone"`
 		Install string `json:"install"`
 		Build   string `json:"build"`
-		Prisma  string `json:"prisma,omitempty"`
 	} `json:"outputs"`
 	Error string `json:"error,omitempty"`
 }
@@ -38,11 +37,12 @@ type Deployment struct {
 var (
 	deployMutex sync.Mutex
 	validFrameworks = map[string]bool{
-		"react":       true,
-		"vue":        true,
-		"angular":    true,
-		"svelte":     true,
-		"node-prisma": true,
+		"react":    true,
+		"vue":      true,
+		"angular":  true,
+		"svelte":   true,
+		"nextjs":   true,
+		"nuxt":     true,
 	}
 )
 
@@ -61,10 +61,15 @@ func runCommand(ctx context.Context, dir string, timeout time.Duration, name str
 	return string(output), err
 }
 
-func copyDir(src, dst string) error {
+func copyDirContents(src, dst string) error {
 	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
+		}
+
+		// Skip root directory
+		if path == src {
+			return nil
 		}
 
 		relPath, err := filepath.Rel(src, path)
@@ -75,7 +80,7 @@ func copyDir(src, dst string) error {
 		destPath := filepath.Join(dst, relPath)
 
 		if info.IsDir() {
-			return os.MkdirAll(destPath, info.Mode())
+			return os.MkdirAll(destPath, 0755)
 		}
 
 		srcFile, err := os.Open(path)
@@ -90,11 +95,8 @@ func copyDir(src, dst string) error {
 		}
 		defer destFile.Close()
 
-		if _, err := io.Copy(destFile, srcFile); err != nil {
-			return err
-		}
-
-		return os.Chmod(destPath, info.Mode())
+		_, err = io.Copy(destFile, srcFile)
+		return err
 	})
 }
 
@@ -126,20 +128,18 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(deployment)
 	}()
 
-	buildPath := filepath.Join("static", "deployments", deployment.ID)
-	deployPath := filepath.Join(buildPath, "dist")
-	deployment.DeployPath = "/deployments/" + deployment.ID + "/dist/"
-
-	// Create build directory
-	if err := os.MkdirAll(buildPath, 0755); err != nil {
+	// Create temp directory
+	tempDir, err := os.MkdirTemp("", "build-")
+	if err != nil {
 		deployment.Status = "failed"
-		deployment.Error = "Failed to create build directory: " + err.Error()
+		deployment.Error = "Failed to create temp directory: " + err.Error()
 		return
 	}
+	defer os.RemoveAll(tempDir)
 
 	// Clone repository
 	ctx := context.Background()
-	output, err := runCommand(ctx, "", 5*time.Minute, "git", "clone", req.RepoURL, buildPath)
+	output, err := runCommand(ctx, "", 5*time.Minute, "git", "clone", req.RepoURL, tempDir)
 	deployment.Outputs.Clone = output
 	if err != nil {
 		deployment.Status = "failed"
@@ -147,29 +147,8 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Framework-specific handling
-	if req.Framework == "node-prisma" {
-		if _, err := os.Stat(filepath.Join(buildPath, "prisma/schema.prisma")); err == nil {
-			output, err = runCommand(ctx, buildPath, 2*time.Minute, "npx", "prisma", "generate")
-			deployment.Outputs.Prisma = output
-			if err != nil {
-				deployment.Status = "failed"
-				deployment.Error = "Prisma generate failed: " + err.Error()
-				return
-			}
-
-			output, err = runCommand(ctx, buildPath, 2*time.Minute, "npx", "prisma", "migrate", "deploy")
-			deployment.Outputs.Prisma += "\n" + output
-			if err != nil {
-				deployment.Status = "failed"
-				deployment.Error = "Prisma migrate failed: " + err.Error()
-				return
-			}
-		}
-	}
-
 	// Install dependencies
-	output, err = runCommand(ctx, buildPath, 10*time.Minute, "npm", "install")
+	output, err = runCommand(ctx, tempDir, 10*time.Minute, "npm", "install")
 	deployment.Outputs.Install = output
 	if err != nil {
 		deployment.Status = "failed"
@@ -178,7 +157,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Build project
-	output, err = runCommand(ctx, buildPath, 10*time.Minute, "npm", "run", "build")
+	output, err = runCommand(ctx, tempDir, 10*time.Minute, "npm", "run", "build")
 	deployment.Outputs.Build = output
 	if err != nil {
 		deployment.Status = "failed"
@@ -187,25 +166,41 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify build output
-	if _, err := os.Stat(deployPath); err != nil {
+	distPath := filepath.Join(tempDir, "dist")
+	if _, err := os.Stat(distPath); err != nil {
 		deployment.Status = "failed"
 		deployment.Error = "Build output missing: " + err.Error()
 		return
 	}
 
+	// Create deployment directory
+	deployDir := filepath.Join("static", "deployments", deployment.ID)
+	if err := os.MkdirAll(deployDir, 0755); err != nil {
+		deployment.Status = "failed"
+		deployment.Error = "Failed to create deployment directory: " + err.Error()
+		return
+	}
+
+	// Copy only dist contents
+	if err := copyDirContents(distPath, deployDir); err != nil {
+		deployment.Status = "failed"
+		deployment.Error = "Failed to copy build output: " + err.Error()
+		return
+	}
+
 	deployment.Status = "success"
+	deployment.DeployPath = "/deployments/" + deployment.ID + "/"
 }
 
 func main() {
 	// Create required directories
-	// if _, err := os.Stat("static"); os.IsNotExist(err) {
-	// 		os.Mkdir("static", 0755)
-	// }
 	os.MkdirAll(filepath.Join("static", "deployments"), 0755)
 
 	// Serve deployment files
-	http.Handle("/deployments/", http.StripPrefix("/deployments/",
-		http.FileServer(http.Dir(filepath.Join("static", "deployments"))))
+	http.Handle("/deployments/", 
+		http.StripPrefix("/deployments/",
+			http.FileServer(
+				http.Dir(filepath.Join("static", "deployments")))))
 
 	// Deployment endpoint
 	http.HandleFunc("/deploy", deployHandler)
