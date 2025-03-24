@@ -210,7 +210,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
-	// Ensure static directory existsekili
+	// Ensure static directory exists
 	if _, err := os.Stat("static"); os.IsNotExist(err) {
 		os.Mkdir("static", 0755)
 	}
