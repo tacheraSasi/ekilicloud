@@ -198,9 +198,9 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	// Create required directories
-	if _, err := os.Stat("static"); os.IsNotExist(err) {
-			os.Mkdir("static", 0755)
-		}
+	// if _, err := os.Stat("static"); os.IsNotExist(err) {
+	// 		os.Mkdir("static", 0755)
+	// }
 	os.MkdirAll(filepath.Join("static", "deployments"), 0755)
 
 	// Serve deployment files
