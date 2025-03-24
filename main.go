@@ -16,6 +16,14 @@ type DeployRequest struct {
 	RepoURL string `json:"repo_url"`
 }
 
+// Helper function for running shell commands with a timeout
+func runCommand(cmd *exec.Cmd) ([]byte, error) {
+	// Timeout for each command to prevent hanging
+	cmd.Timeout = time.Second * 300 // Set a timeout for each command, e.g., 5 minutes
+	output, err := cmd.CombinedOutput()
+	return output, err
+}
+
 func deployHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse JSON payload
 	var req DeployRequest
@@ -31,10 +39,11 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to create build directory", http.StatusInternalServerError)
 		return
 	}
+	defer os.RemoveAll(buildFolder) // Cleanup build folder after process is done
 
 	// Clone the repository into the build folder
 	cloneCmd := exec.Command("git", "clone", req.RepoURL, buildFolder)
-	cloneOutput, err := cloneCmd.CombinedOutput()
+	cloneOutput, err := runCommand(cloneCmd)
 	if err != nil {
 		log.Printf("Git clone error: %s", string(cloneOutput))
 		http.Error(w, "Failed to clone repository", http.StatusInternalServerError)
@@ -44,7 +53,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	// Run "npm install" in the cloned directory
 	npmInstallCmd := exec.Command("npm", "install")
 	npmInstallCmd.Dir = buildFolder
-	installOutput, err := npmInstallCmd.CombinedOutput()
+	installOutput, err := runCommand(npmInstallCmd)
 	if err != nil {
 		log.Printf("npm install error: %s", string(installOutput))
 		http.Error(w, "npm install failed", http.StatusInternalServerError)
@@ -54,7 +63,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 	// Run "npm run build" in the cloned directory
 	npmBuildCmd := exec.Command("npm", "run", "build")
 	npmBuildCmd.Dir = buildFolder
-	buildOutput, err := npmBuildCmd.CombinedOutput()
+	buildOutput, err := runCommand(npmBuildCmd)
 	if err != nil {
 		log.Printf("npm build error: %s", string(buildOutput))
 		http.Error(w, "npm build failed", http.StatusInternalServerError)
@@ -68,8 +77,7 @@ func deployHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// At this point, you could set up routing for a domain that serves files from 'dist'.
-	// For demonstration, we simply return a success message with the path.
+	// Return success response
 	response := map[string]string{
 		"message": "Build succeeded",
 		"build":   buildFolder,
@@ -83,9 +91,7 @@ func main() {
 	// API endpoint for deployment
 	http.HandleFunc("/deploy", deployHandler)
 
-	// Optionally, serve static files from a fixed directory for testing.
-	// In production, you would route domains to the correct "dist" folder.
-	// Here, "/static/" serves files from a "static" folder.
+	// Serve static files from "dist" directory (after build)
 	fs := http.FileServer(http.Dir("./static"))
 	http.Handle("/static/", http.StripPrefix("/static/", fs))
 
